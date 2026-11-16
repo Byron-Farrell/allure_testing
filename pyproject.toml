@@ -15,7 +15,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["backend"]
+pythonpath = [".", "backend"]
 DJANGO_SETTINGS_MODULE = "config.settings"
 testpaths = ["tests"]
 addopts = ["--alluredir=allure-results"]

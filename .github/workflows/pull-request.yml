@@ -1,0 +1,107 @@
+name: Pull request
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install Allure
+        run: npm install -g allure
+
+      - name: Classify test delta
+        run: |
+          set -euo pipefail
+          uv run python -m ci.pr_test_delta \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}" \
+            --output pr-test-delta.json
+
+      - name: Copy Allure history
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "base commit ${base} is not available" >&2
+            exit 1
+          fi
+          history=""
+          if git cat-file -e "${base}:.allure/history.jsonl" 2>/dev/null; then
+            history=".allure/history.jsonl"
+          elif git cat-file -e "${base}:history.jsonl" 2>/dev/null; then
+            history="history.jsonl"
+          fi
+          if [ -n "${history}" ]; then
+            mkdir -p .allure
+            git show "${base}:${history}" > .allure/history.jsonl
+            printf '%s\n' '{"historyPath":".allure/history.jsonl"}' > allurerc.json
+          fi
+
+      - name: Run tests
+        run: PR_TEST_DELTA_PATH=pr-test-delta.json uv run pytest
+
+      - name: Generate Allure report
+        if: always()
+        run: allure generate allure-results -o allure-report
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results
+          path: allure-results
+
+      - name: Upload Allure report
+        id: allure-report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-report
+          path: allure-report
+
+      - name: Publish Allure summary
+        if: always()
+        uses: allure-framework/allure-action@v0.11.3
+        with:
+          report-directory: ./allure-report
+          github-token: ${{ github.token }}
+          sections: new
+
+      - name: Post git-diff comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          uv run python -m ci.pr_delta_comment
+          --delta pr-test-delta.json
+          --results allure-results
+          --artifact-url "${{ steps.allure-report.outputs.artifact-url }}"
+          --repo "${{ github.repository }}"
+          --pr "${{ github.event.pull_request.number }}"
