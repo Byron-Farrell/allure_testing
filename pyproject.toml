@@ -1,0 +1,21 @@
+[project]
+name = "allure-testing"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "django~=5.2.0",
+    "django-ninja>=1.8.0",
+]
+
+[dependency-groups]
+dev = [
+    "allure-pytest>=2.16.2",
+    "pytest>=9.2.0",
+    "pytest-django>=4.14.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend"]
+DJANGO_SETTINGS_MODULE = "config.settings"
+testpaths = ["tests"]
+addopts = ["--alluredir=allure-results"]
