@@ -39,6 +39,9 @@ pip-delete-this-directory.txt
 # Allure
 allure-results/
 allure-report/
+gh-pages/
+.allure/
+pr-test-delta.json
 
 # Unit test / coverage reports
 htmlcov/

@@ -1,0 +1,160 @@
+name: Pull request
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+  pages: write
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install Allure
+        run: npm install -g allure
+
+      - name: Classify test delta
+        run: |
+          set -euo pipefail
+          uv run python -m ci.pr_test_delta \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}" \
+            --output pr-test-delta.json
+
+      - name: Copy Allure history
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "base commit ${base} is not available" >&2
+            exit 1
+          fi
+          history=""
+          if git cat-file -e "${base}:.allure/history.jsonl" 2>/dev/null; then
+            history=".allure/history.jsonl"
+          elif git cat-file -e "${base}:history.jsonl" 2>/dev/null; then
+            history="history.jsonl"
+          fi
+          if [ -n "${history}" ]; then
+            mkdir -p .allure
+            git show "${base}:${history}" > .allure/history.jsonl
+            printf '%s\n' '{"historyPath":".allure/history.jsonl"}' > allurerc.json
+          fi
+
+      - name: Run tests
+        run: PR_TEST_DELTA_PATH=pr-test-delta.json uv run pytest
+
+      - name: Generate Allure report
+        if: always()
+        run: allure generate allure-results -o allure-report
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-results
+          path: allure-results
+
+      - name: Upload Allure report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: allure-report
+          path: allure-report
+
+      - name: Stage GitHub Pages site
+        id: pages
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -f allure-report/index.html ]; then
+            echo "url=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pr="${{ github.event.pull_request.number }}"
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          repo="${{ github.event.repository.name }}"
+          mkdir -p "gh-pages/pr-${pr}"
+          cp -a allure-report/. "gh-pages/pr-${pr}/"
+          : > gh-pages/.nojekyll
+          echo "url=https://${owner}.github.io/${repo}/pr-${pr}/" >> "$GITHUB_OUTPUT"
+
+      - name: Publish report to GitHub Pages
+        if: always() && steps.pages.outputs.url != ''
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ github.token }}
+          publish_dir: ./gh-pages
+          keep_files: true
+          commit_message: "Publish Allure report for pull request ${{ github.event.pull_request.number }}"
+
+      - name: Enable GitHub Pages
+        if: always() && steps.pages.outputs.url != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          status="$(curl -sS -o /tmp/pages.json -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pages")"
+          if [ "${status}" = "200" ]; then
+            exit 0
+          fi
+          created="$(curl -sS -o /tmp/pages-create.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pages" \
+            -d '{"source":{"branch":"gh-pages","path":"/"}}')"
+          echo "GitHub Pages create returned HTTP ${created}."
+          if [ "${created}" != "201" ]; then
+            echo "Set Pages to deploy from the gh-pages branch so the report web app is public." >&2
+            exit 1
+          fi
+
+      - name: Publish Allure summary
+        if: always()
+        uses: allure-framework/allure-action@v0.11.3
+        with:
+          report-directory: ./allure-report
+          github-token: ${{ github.token }}
+          remote-href: ${{ steps.pages.outputs.url }}
+          sections: new
+
+      - name: Post git-diff comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          uv run python -m ci.pr_delta_comment
+          --delta pr-test-delta.json
+          --results allure-results
+          --report allure-report
+          --report-url "${{ steps.pages.outputs.url }}"
+          --repo "${{ github.repository }}"
+          --pr "${{ github.event.pull_request.number }}"
